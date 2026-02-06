@@ -1,0 +1,23 @@
+# Copy this file to terraform.tfvars and fill in your actual values
+# terraform.tfvars is gitignored to prevent committing sensitive information
+
+# ARN of your existing ECS cluster (Fargate-compatible)
+cluster_arn = "arn:aws:ecs:REGION:ACCOUNT_ID:cluster/CLUSTER_NAME"
+
+# List of private subnet IDs where ECS tasks will run
+# These subnets should have access to internet via NAT Gateway or VPC Endpoints
+private_subnets = [
+  "subnet-xxxxxxxxxxxxxxxxx",
+  "subnet-xxxxxxxxxxxxxxxxx"
+]
+
+# Security group ID for ECS tasks
+# Must allow outbound HTTPS (port 443) for AWS API calls
+ecs_sg_id = "sg-xxxxxxxxxxxxxxxxx"
+
+# AWS region where resources will be created
+aws_region = "us-east-1"
+
+# Full URI of your Docker image in ECR
+# Format: ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/REPO_NAME:TAG
+container_image = "123456789012.dkr.ecr.us-east-1.amazonaws.com/tag-script:latest"

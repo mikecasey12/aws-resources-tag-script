@@ -1,0 +1,6 @@
+services:
+  tag-script:
+    build: .
+    image: tag-script:latest
+    env_file:
+      - .env
