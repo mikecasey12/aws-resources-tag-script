@@ -8,8 +8,8 @@ resource "aws_ecs_task_definition" "automation_task" {
   task_role_arn            = aws_iam_role.ecs_task_role.arn
 
   container_definitions = jsonencode([{
-    name      = "worker"
-    image     = var.container_image
+    name  = "worker"
+    image = var.container_image
     environment = [
       { name = "AWS_REGION", value = var.aws_region },
       { name = "NODE_ENV", value = "production" }

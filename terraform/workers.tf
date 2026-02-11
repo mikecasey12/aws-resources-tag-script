@@ -1,6 +1,6 @@
 # The Infrastructure Role (Execution)
 resource "aws_iam_role" "ecs_exec_role" {
-  name = "universal-ecs-exec-role"
+  name               = "universal-ecs-exec-role"
   assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
 }
 
@@ -32,7 +32,7 @@ resource "aws_iam_role_policy" "ecs_exec_logs" {
 
 # The Logic Role (Task)
 resource "aws_iam_role" "ecs_task_role" {
-  name = "universal-ecs-task-role"
+  name               = "universal-ecs-task-role"
   assume_role_policy = data.aws_iam_policy_document.ecs_trust.json
 }
 

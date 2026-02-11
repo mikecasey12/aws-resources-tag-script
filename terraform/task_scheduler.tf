@@ -1,20 +1,20 @@
 # The Trigger Role
 resource "aws_iam_role" "eb_trigger_role" {
-  name               = "eventbridge-ecs-trigger-role"
+  name = "eventbridge-ecs-trigger-role"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
+        Action    = "sts:AssumeRole"
+        Effect    = "Allow"
         Principal = { Service = "events.amazonaws.com" }
       },
       {
-          Action = "sts:AssumeRole"
-          Effect = "Allow"
-          Principal = {
-            Service = "ecs-tasks.amazonaws.com"
-          }
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ecs-tasks.amazonaws.com"
+        }
       }
     ]
   })
@@ -54,14 +54,14 @@ resource "aws_iam_role_policy" "tagging_permissions" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = [
+        Effect = "Allow"
+        Action = [
           # Resource Groups Tagging API
           "tag:GetResources",
           "tag:TagResources",
           "tag:GetTagKeys",
           "tag:GetTagValues",
-          
+
           # IAM permissions
           "iam:GetRole",
           "iam:GetUser",
@@ -71,24 +71,24 @@ resource "aws_iam_role_policy" "tagging_permissions" {
           "iam:ListUserTags",
           "iam:TagRole",
           "iam:TagUser",
-          
+
           # EC2 permissions
           "ec2:DescribeRegions",
           "ec2:DescribeInstances",
           "ec2:DescribeSecurityGroups",
           "ec2:CreateTags",
-          
+
           # S3 permissions
           "s3:ListAllMyBuckets",
           "s3:GetBucketLocation",
           "s3:GetBucketTagging",
           "s3:PutBucketTagging",
-          
+
           # SNS permissions
           "sns:ListTopics",
           "sns:ListTagsForResource",
           "sns:TagResource",
-          
+
           # STS for account identity
           "sts:GetCallerIdentity"
         ]
@@ -106,18 +106,18 @@ resource "aws_cloudwatch_event_rule" "schedule" {
 
 # Connecting Schedule to Task
 resource "aws_cloudwatch_event_target" "target" {
-  rule      = aws_cloudwatch_event_rule.schedule.name
-  arn       = var.cluster_arn
-  role_arn  = aws_iam_role.eb_trigger_role.arn
+  rule     = aws_cloudwatch_event_rule.schedule.name
+  arn      = var.cluster_arn
+  role_arn = aws_iam_role.eb_trigger_role.arn
 
   ecs_target {
     task_count          = 1
     task_definition_arn = aws_ecs_task_definition.automation_task.arn
     launch_type         = "FARGATE"
     network_configuration {
-      subnets          = var.private_subnets
-      security_groups  = [var.ecs_sg_id]
-      assign_public_ip = true  # Changed to true for internet access without NAT Gateway
+      subnets          = local.private_subnet_ids
+      security_groups  = [local.ecs_sg_id]
+      assign_public_ip = true # Changed to true for internet access without NAT Gateway
     }
   }
 }
