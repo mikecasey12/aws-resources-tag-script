@@ -101,7 +101,7 @@ resource "aws_iam_role_policy" "tagging_permissions" {
 # The Schedule (Cron)
 resource "aws_cloudwatch_event_rule" "schedule" {
   name                = "automation-schedule"
-  schedule_expression = "cron(0/10 * * * ? *)" # Every 5 minutes
+  schedule_expression = "cron(0/5 * * * ? *)" # Every 5 minutes
 }
 
 # Connecting Schedule to Task

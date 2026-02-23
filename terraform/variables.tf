@@ -3,9 +3,12 @@ variable "cluster_arn" {
   type        = string
 }
 
-# Network Configuration Variables
+# ---------------------------------------------------------------------------
+# Network configuration
+# ---------------------------------------------------------------------------
+
 variable "vpc_id" {
-  description = "VPC ID where resources will be created. If not provided, uses the default VPC (if available)"
+  description = "VPC ID where resources will be created. Leave empty to use the default VPC."
   type        = string
   default     = ""
 
@@ -15,36 +18,37 @@ variable "vpc_id" {
   }
 }
 
-variable "existing_private_subnets" {
-  description = "List of existing private subnet IDs for ECS tasks. If not provided, new subnets will be created"
-  type        = list(string)
-  default     = []
-}
-
-variable "existing_ecs_sg_id" {
-  description = "Existing security group ID for ECS tasks. If not provided, a new security group will be created"
-  type        = string
-  default     = ""
-}
-
-variable "subnet_count" {
-  description = "Number of private subnets to create (only used if existing_private_subnets is not provided)"
-  type        = number
-  default     = 2
-}
-
-# Deprecated variables - use existing_private_subnets and existing_ecs_sg_id instead
 variable "private_subnets" {
-  description = "(Deprecated) Use existing_private_subnets instead. List of private subnet IDs for ECS tasks"
+  description = <<-EOT
+    List of existing private subnet IDs to use for ECS tasks.
+    When provided, these subnets are used as-is.
+    When left empty, Terraform will look for subnets it previously created (by tag)
+    and create new ones if none are found.
+  EOT
   type        = list(string)
   default     = []
 }
 
 variable "ecs_sg_id" {
-  description = "(Deprecated) Use existing_ecs_sg_id instead. Security group ID for ECS tasks"
+  description = <<-EOT
+    Existing security group ID for ECS tasks.
+    When provided, this security group is used as-is.
+    When left empty, Terraform will look for a security group it previously created
+    (by tag) and create a new one if none is found.
+  EOT
   type        = string
   default     = ""
 }
+
+variable "subnet_count" {
+  description = "Number of private subnets to create when no existing subnets are found."
+  type        = number
+  default     = 2
+}
+
+# ---------------------------------------------------------------------------
+# General
+# ---------------------------------------------------------------------------
 
 variable "aws_region" {
   description = "AWS region for resources"

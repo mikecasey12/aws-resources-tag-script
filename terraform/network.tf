@@ -1,13 +1,19 @@
 # Network Infrastructure
-# This file creates private subnets and security group for ECS tasks
+# Resolution priority for subnets and the ECS security group:
+#   1. Explicit IDs supplied via variables (private_subnets / ecs_sg_id)
+#      — verified to actually exist in AWS; falls through if any ID is missing
+#   2. Auto-discovered resources previously created by this configuration (matched by tag)
+#   3. Create new resources when neither of the above yields a result
 
-# Data source to get VPC information
+# ---------------------------------------------------------------------------
+# VPC resolution
+# ---------------------------------------------------------------------------
+
 data "aws_vpc" "selected" {
   count = var.vpc_id != "" ? 1 : 0
   id    = var.vpc_id
 }
 
-# Data source to get default VPC if no VPC ID is provided
 data "aws_vpc" "default" {
   count   = var.vpc_id == "" ? 1 : 0
   default = true
@@ -20,59 +26,129 @@ data "aws_vpc" "default" {
   }
 }
 
-# Data source to get availability zones
 data "aws_availability_zones" "available" {
   state = "available"
 }
 
-# Validation check to ensure we have a VPC
 resource "terraform_data" "vpc_validation" {
   lifecycle {
     precondition {
       condition     = var.vpc_id != "" || length(data.aws_vpc.default) > 0
       error_message = <<-EOT
         No VPC available for resource creation.
-        
+
         Either:
-        1. Specify a VPC ID using the 'vpc_id' variable in your terraform.tfvars
-        2. Create a default VPC in your AWS account
-        
-        If you don't have a default VPC, you must explicitly provide a vpc_id.
+          1. Specify a VPC ID using the 'vpc_id' variable in your terraform.tfvars
+          2. Create a default VPC in your AWS account
       EOT
     }
   }
 }
 
-# Local values for VPC selection
 locals {
   vpc_id = var.vpc_id != "" ? data.aws_vpc.selected[0].id : (
     length(data.aws_vpc.default) > 0 ? data.aws_vpc.default[0].id : null
   )
 
-  # Get CIDR block for the selected VPC
   vpc_cidr = var.vpc_id != "" ? data.aws_vpc.selected[0].cidr_block : (
     length(data.aws_vpc.default) > 0 ? data.aws_vpc.default[0].cidr_block : null
   )
-
-  # Handle backward compatibility with deprecated variables
-  # Priority: existing_* variables > deprecated variables > create new
-  actual_private_subnets = length(var.existing_private_subnets) > 0 ? var.existing_private_subnets : (
-    length(var.private_subnets) > 0 ? var.private_subnets : []
-  )
-  actual_ecs_sg_id = var.existing_ecs_sg_id != "" ? var.existing_ecs_sg_id : (
-    var.ecs_sg_id != "" ? var.ecs_sg_id : ""
-  )
-
-  # Use provided subnets if available, otherwise use created ones
-  use_existing_subnets = length(local.actual_private_subnets) > 0
-  private_subnet_ids   = local.use_existing_subnets ? local.actual_private_subnets : aws_subnet.private[*].id
-
-  # Use provided security group if available, otherwise use created one
-  use_existing_sg = local.actual_ecs_sg_id != ""
-  ecs_sg_id       = local.use_existing_sg ? local.actual_ecs_sg_id : aws_security_group.ecs_tasks[0].id
 }
 
-# Create private subnets
+# ---------------------------------------------------------------------------
+# Step 1 — Verify explicitly provided IDs actually exist in AWS
+# data "aws_subnets" / "aws_security_groups" return an EMPTY list (no error)
+# when a filter matches nothing, so these are safe "check if exists" queries.
+# ---------------------------------------------------------------------------
+
+# Returns only the provided subnet IDs that currently exist in AWS
+data "aws_subnets" "provided" {
+  count = length(var.private_subnets) > 0 ? 1 : 0
+
+  filter {
+    name   = "subnet-id"
+    values = var.private_subnets
+  }
+}
+
+# Returns the provided SG ID only if it currently exists in AWS
+data "aws_security_groups" "provided_sg" {
+  count = var.ecs_sg_id != "" ? 1 : 0
+
+  filter {
+    name   = "group-id"
+    values = [var.ecs_sg_id]
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Step 2 — Auto-discover resources previously created by this configuration
+# ---------------------------------------------------------------------------
+
+# Subnets tagged by a previous apply of this configuration
+data "aws_subnets" "managed" {
+  filter {
+    name   = "vpc-id"
+    values = [local.vpc_id]
+  }
+  tags = {
+    ManagedBy = "terraform"
+    Type      = "private"
+  }
+}
+
+# Security group tagged by a previous apply of this configuration
+data "aws_security_groups" "managed_ecs" {
+  filter {
+    name   = "vpc-id"
+    values = [local.vpc_id]
+  }
+  filter {
+    name   = "group-name"
+    values = ["ecs-tasks-sg"]
+  }
+  tags = {
+    ManagedBy = "terraform"
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Resource resolution locals
+# Priority: provided IDs (verified) → auto-discovered (by tag) → create new
+# ---------------------------------------------------------------------------
+
+locals {
+  # Subnets ----------------------------------------------------------------
+  # All provided IDs are valid only when AWS confirms every one of them exists
+  provided_subnets_valid = (
+    length(var.private_subnets) > 0 &&
+    length(data.aws_subnets.provided) > 0 &&
+    length(data.aws_subnets.provided[0].ids) == length(var.private_subnets)
+  )
+  discovered_subnet_ids = tolist(data.aws_subnets.managed.ids)
+  resolved_subnet_ids = (
+    local.provided_subnets_valid ? var.private_subnets : local.discovered_subnet_ids
+  )
+  use_existing_subnets = length(local.resolved_subnet_ids) > 0
+  private_subnet_ids   = local.use_existing_subnets ? local.resolved_subnet_ids : aws_subnet.private[*].id
+
+  # Security group ---------------------------------------------------------
+  # The provided SG ID is valid only when AWS confirms it exists
+  provided_sg_valid = (
+    var.ecs_sg_id != "" &&
+    length(data.aws_security_groups.provided_sg) > 0 &&
+    length(data.aws_security_groups.provided_sg[0].ids) > 0
+  )
+  discovered_sg_id = length(data.aws_security_groups.managed_ecs.ids) > 0 ? data.aws_security_groups.managed_ecs.ids[0] : ""
+  resolved_sg_id   = local.provided_sg_valid ? var.ecs_sg_id : local.discovered_sg_id
+  use_existing_sg  = local.resolved_sg_id != ""
+  ecs_sg_id        = local.use_existing_sg ? local.resolved_sg_id : aws_security_group.ecs_tasks[0].id
+}
+
+# ---------------------------------------------------------------------------
+# Resource creation (skipped when existing resources are found/provided)
+# ---------------------------------------------------------------------------
+
 resource "aws_subnet" "private" {
   count = local.use_existing_subnets ? 0 : var.subnet_count
 
@@ -87,7 +163,6 @@ resource "aws_subnet" "private" {
   }
 }
 
-# Security group for ECS tasks
 resource "aws_security_group" "ecs_tasks" {
   count = local.use_existing_sg ? 0 : 1
 
@@ -95,7 +170,6 @@ resource "aws_security_group" "ecs_tasks" {
   description = "Security group for ECS tasks"
   vpc_id      = local.vpc_id
 
-  # Egress rule - allow all outbound traffic
   egress {
     from_port   = 0
     to_port     = 0
@@ -104,7 +178,6 @@ resource "aws_security_group" "ecs_tasks" {
     description = "Allow all outbound traffic"
   }
 
-  # Ingress rule - allow traffic within the security group
   ingress {
     from_port   = 0
     to_port     = 0

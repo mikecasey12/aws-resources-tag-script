@@ -1,5 +1,5 @@
-# Copy this file to terraform.tfvars and fill in your actual values
-# terraform.tfvars is gitignored to prevent committing sensitive information
+# Copy this file to terraform.tfvars and fill in your actual values.
+# terraform.tfvars is gitignored to prevent committing sensitive information.
 
 # ARN of your existing ECS cluster (Fargate-compatible)
 cluster_arn = "arn:aws:ecs:REGION:ACCOUNT_ID:cluster/CLUSTER_NAME"
@@ -11,28 +11,35 @@ aws_region = "us-east-1"
 # Format: ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/REPO_NAME:TAG
 container_image = "123456789012.dkr.ecr.us-east-1.amazonaws.com/tag-script:latest"
 
-#############################################################################
-# Network Configuration - Choose ONE of the following options:
-#############################################################################
+###############################################################################
+# Network Configuration
+###############################################################################
 
-# OPTION 1: Let Terraform create new subnets and security group (Recommended)
-# Uncomment the following lines to create new network resources:
-# 
-# vpc_id = "vpc-xxxxxxxxxxxxxxxxx"  # REQUIRED if you don't have a default VPC
-#                                    # Optional if default VPC exists
-# subnet_count = 2                  # Number of subnets to create (default: 2)
-#
-# IMPORTANT: If your AWS account has no default VPC, you MUST specify vpc_id
+# VPC to deploy into.  Omit if you have a default VPC.
+# vpc_id = "vpc-xxxxxxxxxxxxxxxxx"
 
-# OPTION 2: Use existing subnets and security group
-# Uncomment and fill in the following if you have existing network resources:
-# existing_private_subnets = [
+# ---------------------------------------------------------------------------
+# Subnets
+# ---------------------------------------------------------------------------
+# Option A — provide existing subnet IDs (used as-is, no lookup performed):
+# private_subnets = [
 #   "subnet-xxxxxxxxxxxxxxxxx",
-#   "subnet-xxxxxxxxxxxxxxxxx"
+#   "subnet-xxxxxxxxxxxxxxxxx",
 # ]
-# existing_ecs_sg_id = "sg-xxxxxxxxxxxxxxxxx"
+#
+# Option B — leave unset (or set to []):
+#   Terraform will first look for subnets it previously created (matched by
+#   the ManagedBy=terraform tag).  If none are found it will create new ones.
+#
+# Number of subnets to create when none are found (default: 2):
+# subnet_count = 2
 
-# DEPRECATED (for backward compatibility only):
-# If you're using old variable names, these will still work:
-# private_subnets = ["subnet-xxx", "subnet-xxx"]
-# ecs_sg_id = "sg-xxx"
+# ---------------------------------------------------------------------------
+# ECS Security Group
+# ---------------------------------------------------------------------------
+# Option A — provide an existing security group ID (used as-is):
+# ecs_sg_id = "sg-xxxxxxxxxxxxxxxxx"
+#
+# Option B — leave unset (or set to ""):
+#   Terraform will first look for a security group it previously created
+#   (matched by tag).  If none is found it will create a new one.
