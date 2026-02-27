@@ -1,0 +1,14 @@
+index.txt
+package-lock.json
+node_modules
+*.env
+.env
+.env.local
+.env.*.local
+
+# Terraform
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/terraform.tfvars

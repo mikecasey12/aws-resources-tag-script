@@ -1,0 +1,98 @@
+# Copy this file to terraform.tfvars and fill in your actual values.
+# terraform.tfvars is gitignored to prevent committing sensitive information.
+
+# AWS region where the instance will be launched
+aws_region = "us-east-1"
+
+###############################################################################
+# Network Configuration
+# All network settings are optional — Terraform resolves them automatically.
+###############################################################################
+
+# VPC to deploy into.
+# Option A — specify an existing VPC:
+#   vpc_id = "vpc-xxxxxxxxxxxxxxxxx"
+#
+# Option B — omit to use the default VPC (if one exists), or let Terraform
+#   create a new VPC (with an Internet Gateway and route table) automatically.
+
+# ---------------------------------------------------------------------------
+# Subnet
+# ---------------------------------------------------------------------------
+# Option A — provide an existing subnet ID (used as-is):
+#   subnet_id = "subnet-xxxxxxxxxxxxxxxxx"
+#
+# Option B — leave unset (or set to ""):
+#   Terraform will first look for a subnet it previously created
+#   (matched by ManagedBy=terraform / Type=ec2-public tags).
+#   If none are found it will create a new one in the resolved VPC.
+
+# ---------------------------------------------------------------------------
+# Security Group
+# ---------------------------------------------------------------------------
+# Option A — provide an existing security group ID (used as-is):
+#   security_group_id = "sg-xxxxxxxxxxxxxxxxx"
+#
+# Option B — leave unset (or set to ""):
+#   Terraform will first look for a security group it previously created
+#   (matched by tag).  If none is found it will create a new one with
+#   SSH (port 22) inbound and all outbound traffic allowed.
+
+###############################################################################
+# Instance Configuration
+###############################################################################
+
+# A descriptive name for the instance (used as the Name tag)
+instance_name = "my-ec2-instance"
+
+# EC2 instance type (default: t3.micro)
+# instance_type = "t3.micro"
+
+# AMI ID — leave commented out to automatically use the latest Amazon Linux 2023
+# ami_id = "ami-xxxxxxxxxxxxxxxxx"
+
+# Name of an existing EC2 key pair for SSH access.
+# Leave commented out to use SSM Session Manager instead (recommended).
+# key_name = "my-key-pair"
+
+# Assign a public IP to the instance (default: true)
+# associate_public_ip = true
+
+###############################################################################
+# Storage
+###############################################################################
+
+# Root EBS volume size in GiB (default: 20)
+# root_volume_size = 20
+
+# EBS volume type: gp3, gp2, io1, io2 (default: gp3)
+# root_volume_type = "gp3"
+
+###############################################################################
+# User Data
+###############################################################################
+
+# Shell script to run on first boot.  Leave commented out for no user data.
+# user_data = <<-EOT
+#   #!/bin/bash
+#   yum update -y
+#   yum install -y amazon-cloudwatch-agent
+# EOT
+
+###############################################################################
+# SSM Session Manager
+###############################################################################
+
+# Attach the SSM policy to enable SSH-free access via AWS Systems Manager.
+# Set to false only if you explicitly do not want SSM access (default: true).
+# enable_ssm = true
+
+###############################################################################
+# Additional Tags
+###############################################################################
+
+# Extra tags applied to every resource (merged with the default ManagedBy tag)
+# tags = {
+#   Environment = "production"
+#   Team        = "platform"
+# }

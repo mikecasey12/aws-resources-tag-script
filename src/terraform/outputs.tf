@@ -38,6 +38,11 @@ output "vpc_id" {
   value       = local.vpc_id
 }
 
+output "created_vpc" {
+  description = "Indicates whether a new VPC was created (true) or an existing one was used (false)"
+  value       = var.vpc_id == "" && !local.has_default_vpc
+}
+
 output "private_subnet_ids" {
   description = "IDs of the private subnets used for ECS tasks"
   value       = local.private_subnet_ids

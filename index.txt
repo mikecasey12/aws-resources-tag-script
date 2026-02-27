@@ -1,0 +1,886 @@
+import {
+  ResourceGroupsTaggingAPIClient,
+  GetResourcesCommand,
+  TagResourcesCommand,
+} from "@aws-sdk/client-resource-groups-tagging-api";
+import { SNSClient, TagResourceCommand } from "@aws-sdk/client-sns";
+import {
+  EC2Client,
+  DescribeRegionsCommand,
+  DescribeInstancesCommand,
+  CreateTagsCommand as EC2CreateTagsCommand,
+  DescribeSecurityGroupsCommand,
+} from "@aws-sdk/client-ec2";
+import {
+  IAMClient,
+  ListRolesCommand,
+  ListUsersCommand,
+  TagRoleCommand,
+  TagUserCommand,
+  GetRoleCommand,
+  GetUserCommand,
+} from "@aws-sdk/client-iam";
+import {
+  S3Client,
+  ListBucketsCommand,
+  GetBucketTaggingCommand,
+  PutBucketTaggingCommand,
+  GetBucketLocationCommand,
+} from "@aws-sdk/client-s3";
+import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
+
+const newTags: Record<string, string> = {
+  Owner: "Vinay.N@allegion.com",
+  ApplicationOwner: "Vinay.N@allegion.com",
+  CostAllocation: "International",
+  CostRegion: "International",
+  Environment: "Production",
+  Product: "eTrilock",
+};
+
+interface ResourceWithTags {
+  resourceArn: string;
+  resourceId?: string;
+  resourceType: string;
+  existingTags: Record<string, string>;
+  region: string;
+}
+
+interface TaggingResult {
+  success: number;
+  failed: number;
+  errors: string[];
+}
+
+// Cached account ID to avoid multiple STS calls
+let cachedAccountId: string | null = null;
+
+/**
+ * Gets the AWS account ID using STS
+ */
+async function getAccountId(): Promise<string> {
+  if (cachedAccountId) {
+    return cachedAccountId;
+  }
+
+  const stsClient = new STSClient({
+    region: "us-east-1",
+  });
+
+  try {
+    const command = new GetCallerIdentityCommand({});
+    const response = await stsClient.send(command);
+    cachedAccountId = response.Account || "unknown";
+    return cachedAccountId;
+  } catch (error) {
+    console.error("Error getting account ID:", error);
+    return "unknown";
+  }
+}
+
+/**
+ * Gets all AWS regions from the EC2 service.
+ */
+async function getAllRegions(): Promise<string[]> {
+  const ec2Client = new EC2Client({
+    region: "us-east-1",
+  });
+  const command = new DescribeRegionsCommand({});
+  const response = await ec2Client.send(command);
+  return (
+    response.Regions?.map((region) => region.RegionName || "").filter(
+      Boolean
+    ) || []
+  );
+}
+
+/**
+ * Gets resources that don't have any of the required tags or are missing some tags
+ */
+function getResourcesNeedingTags(
+  resources: ResourceWithTags[]
+): ResourceWithTags[] {
+  const requiredTagKeys = Object.keys(newTags);
+
+  return resources.filter((resource) => {
+    const existingTagKeys = Object.keys(resource.existingTags);
+
+    // Check if any required tags are missing
+    const missingTags = requiredTagKeys.filter(
+      (tagKey) => !existingTagKeys.includes(tagKey)
+    );
+
+    return missingTags.length > 0;
+  });
+}
+
+/**
+ * Gets all taggable resources using Resource Groups Tagging API
+ */
+async function getResourcesFromTaggingAPI(
+  region: string
+): Promise<ResourceWithTags[]> {
+  const taggingClient = new ResourceGroupsTaggingAPIClient({
+    region,
+  });
+
+  const resources: ResourceWithTags[] = [];
+  let paginationToken: string | undefined;
+
+  do {
+    try {
+      const command = new GetResourcesCommand({
+        PaginationToken: paginationToken,
+      });
+      const response = await taggingClient.send(command);
+
+      if (response.ResourceTagMappingList) {
+        for (const mapping of response.ResourceTagMappingList) {
+          if (mapping.ResourceARN) {
+            const tags: Record<string, string> = {};
+            if (mapping.Tags) {
+              for (const tag of mapping.Tags) {
+                if (tag.Key && tag.Value && !tag.Key.startsWith("aws:")) {
+                  tags[tag.Key] = tag.Value;
+                }
+              }
+            }
+
+            resources.push({
+              resourceArn: mapping.ResourceARN,
+              resourceType: mapping.ResourceARN.split(":")[2] || "unknown",
+              existingTags: tags,
+              region: region,
+            });
+          }
+        }
+      }
+      paginationToken = response.PaginationToken;
+    } catch (error) {
+      console.error(
+        `Error fetching resources from Tagging API in ${region}:`,
+        error
+      );
+      break;
+    }
+  } while (paginationToken);
+
+  return resources;
+}
+
+/**
+ * Gets S3 buckets (global resource)
+ */
+async function getS3Buckets(): Promise<ResourceWithTags[]> {
+  const s3Client = new S3Client({
+    region: "us-east-1",
+  });
+
+  const resources: ResourceWithTags[] = [];
+
+  try {
+    // List all buckets
+    const listCommand = new ListBucketsCommand({});
+    const listResponse = await s3Client.send(listCommand);
+
+    if (listResponse.Buckets) {
+      for (const bucket of listResponse.Buckets) {
+        if (bucket.Name) {
+          try {
+            // Get bucket region first
+            let bucketRegion = "us-east-1";
+            try {
+              const locationCommand = new GetBucketLocationCommand({
+                Bucket: bucket.Name,
+              });
+              const locationResponse = await s3Client.send(locationCommand);
+              bucketRegion = locationResponse.LocationConstraint || "us-east-1";
+              // Handle special case where us-east-1 returns null/empty
+              if (!bucketRegion || bucketRegion === "null") {
+                bucketRegion = "us-east-1";
+              }
+            } catch (locationError) {
+              console.error(
+                `Error getting bucket location for ${bucket.Name}:`,
+                locationError
+              );
+            }
+
+            // Create region-specific S3 client for getting tags
+            const regionS3Client = new S3Client({
+              region: bucketRegion,
+            });
+
+            // Get existing tags
+            const tags: Record<string, string> = {};
+            try {
+              const tagCommand = new GetBucketTaggingCommand({
+                Bucket: bucket.Name,
+              });
+              const tagResponse = await regionS3Client.send(tagCommand);
+
+              if (tagResponse.TagSet) {
+                for (const tag of tagResponse.TagSet) {
+                  if (tag.Key && tag.Value && !tag.Key.startsWith("aws:")) {
+                    tags[tag.Key] = tag.Value;
+                  }
+                }
+              }
+            } catch (tagError: any) {
+              if (tagError.name !== "NoSuchTagSet") {
+                console.error(
+                  `Error getting tags for bucket ${bucket.Name}:`,
+                  tagError
+                );
+              }
+            }
+
+            resources.push({
+              resourceArn: `arn:aws:s3:::${bucket.Name}`,
+              resourceId: bucket.Name,
+              resourceType: "s3-bucket",
+              existingTags: tags,
+              region: bucketRegion,
+            });
+          } catch (error) {
+            console.error(`Error processing bucket ${bucket.Name}:`, error);
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error("Error fetching S3 buckets:", error);
+  }
+
+  return resources;
+}
+
+/**
+ * Gets EC2 instances in a region
+ */
+async function getEC2Instances(region: string): Promise<ResourceWithTags[]> {
+  const ec2Client = new EC2Client({
+    region,
+  });
+
+  const resources: ResourceWithTags[] = [];
+  let nextToken: string | undefined;
+  const accountId = await getAccountId();
+
+  do {
+    try {
+      const command = new DescribeInstancesCommand({
+        NextToken: nextToken,
+      });
+      const response = await ec2Client.send(command);
+
+      if (response.Reservations) {
+        for (const reservation of response.Reservations) {
+          if (reservation.Instances) {
+            for (const instance of reservation.Instances) {
+              if (
+                instance.InstanceId &&
+                instance.State?.Name !== "terminated"
+              ) {
+                const tags: Record<string, string> = {};
+                if (instance.Tags) {
+                  for (const tag of instance.Tags) {
+                    if (tag.Key && tag.Value && !tag.Key.startsWith("aws:")) {
+                      tags[tag.Key] = tag.Value;
+                    }
+                  }
+                }
+
+                resources.push({
+                  resourceArn: `arn:aws:ec2:${region}:${accountId}:instance/${instance.InstanceId}`,
+                  resourceId: instance.InstanceId,
+                  resourceType: "ec2",
+                  existingTags: tags,
+                  region: region,
+                });
+              }
+            }
+          }
+        }
+      }
+      nextToken = response.NextToken;
+    } catch (error) {
+      console.error(`Error fetching EC2 instances in ${region}:`, error);
+      break;
+    }
+  } while (nextToken);
+
+  return resources;
+}
+
+/**
+ * Gets Security Groups in a region
+ */
+async function getSecurityGroups(region: string): Promise<ResourceWithTags[]> {
+  const ec2Client = new EC2Client({
+    region,
+  });
+
+  const resources: ResourceWithTags[] = [];
+  let nextToken: string | undefined;
+  const accountId = await getAccountId();
+
+  do {
+    try {
+      const command = new DescribeSecurityGroupsCommand({
+        NextToken: nextToken,
+      });
+      const response = await ec2Client.send(command);
+
+      if (response.SecurityGroups) {
+        for (const sg of response.SecurityGroups) {
+          if (sg.GroupId) {
+            const tags: Record<string, string> = {};
+            if (sg.Tags) {
+              for (const tag of sg.Tags) {
+                if (tag.Key && tag.Value && !tag.Key.startsWith("aws:")) {
+                  tags[tag.Key] = tag.Value;
+                }
+              }
+            }
+
+            resources.push({
+              resourceArn: `arn:aws:ec2:${region}:${accountId}:security-group/${sg.GroupId}`,
+              resourceId: sg.GroupId,
+              resourceType: "security-group",
+              existingTags: tags,
+              region: region,
+            });
+          }
+        }
+      }
+      nextToken = response.NextToken;
+    } catch (error) {
+      console.error(`Error fetching Security Groups in ${region}:`, error);
+      break;
+    }
+  } while (nextToken);
+
+  return resources;
+}
+
+/**
+ * Gets IAM roles (global resource)
+ */
+async function getIAMRoles(): Promise<ResourceWithTags[]> {
+  const iamClient = new IAMClient({
+    region: "us-east-1",
+  });
+
+  const resources: ResourceWithTags[] = [];
+  let marker: string | undefined;
+
+  do {
+    try {
+      const command = new ListRolesCommand({
+        Marker: marker,
+      });
+      const response = await iamClient.send(command);
+
+      if (response.Roles) {
+        for (const role of response.Roles) {
+          if (role.RoleName && role.Arn) {
+            try {
+              const getRoleCommand = new GetRoleCommand({
+                RoleName: role.RoleName,
+              });
+              const roleDetails = await iamClient.send(getRoleCommand);
+
+              const tags: Record<string, string> = {};
+              if (roleDetails.Role?.Tags) {
+                for (const tag of roleDetails.Role.Tags) {
+                  if (tag.Key && tag.Value && !tag.Key.startsWith("aws:")) {
+                    tags[tag.Key] = tag.Value;
+                  }
+                }
+              }
+
+              resources.push({
+                resourceArn: role.Arn,
+                resourceId: role.RoleName,
+                resourceType: "iam-role",
+                existingTags: tags,
+                region: "global",
+              });
+            } catch (error) {
+              console.error(
+                `Error getting role details for ${role.RoleName}:`,
+                error
+              );
+            }
+          }
+        }
+      }
+      marker = response.Marker;
+    } catch (error) {
+      console.error("Error fetching IAM roles:", error);
+      break;
+    }
+  } while (marker);
+
+  return resources;
+}
+
+/**
+ * Gets IAM users (global resource)
+ */
+async function getIAMUsers(): Promise<ResourceWithTags[]> {
+  const iamClient = new IAMClient({
+    region: "us-east-1",
+  });
+
+  const resources: ResourceWithTags[] = [];
+  let marker: string | undefined;
+
+  do {
+    try {
+      const command = new ListUsersCommand({
+        Marker: marker,
+      });
+      const response = await iamClient.send(command);
+
+      if (response.Users) {
+        for (const user of response.Users) {
+          if (user.UserName && user.Arn) {
+            try {
+              const getUserCommand = new GetUserCommand({
+                UserName: user.UserName,
+              });
+              const userDetails = await iamClient.send(getUserCommand);
+
+              const tags: Record<string, string> = {};
+              if (userDetails.User?.Tags) {
+                for (const tag of userDetails.User.Tags) {
+                  if (tag.Key && tag.Value && !tag.Key.startsWith("aws:")) {
+                    tags[tag.Key] = tag.Value;
+                  }
+                }
+              }
+
+              resources.push({
+                resourceArn: user.Arn,
+                resourceId: user.UserName,
+                resourceType: "iam-user",
+                existingTags: tags,
+                region: "global",
+              });
+            } catch (error) {
+              console.error(
+                `Error getting user details for ${user.UserName}:`,
+                error
+              );
+            }
+          }
+        }
+      }
+      marker = response.Marker;
+    } catch (error) {
+      console.error("Error fetching IAM users:", error);
+      break;
+    }
+  } while (marker);
+
+  return resources;
+}
+
+/**
+ * Tags a resource based on its type
+ */
+async function tagResource(
+  resource: ResourceWithTags,
+  retries = 3
+): Promise<boolean> {
+  const mergedTags = { ...resource.existingTags, ...newTags };
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      switch (resource.resourceType) {
+        case "ec2":
+          await tagEC2Instance(resource, mergedTags);
+          break;
+        case "security-group":
+          await tagSecurityGroup(resource, mergedTags);
+          break;
+        case "iam-role":
+          await tagIAMRole(resource, mergedTags);
+          break;
+        case "iam-user":
+          await tagIAMUser(resource, mergedTags);
+          break;
+        case "s3-bucket":
+          await tagS3Bucket(resource, mergedTags);
+          break;
+        case "sns":
+          await tagSNSResource(resource, mergedTags);
+          break;
+        default:
+          await tagWithResourceGroupsAPI(resource, mergedTags);
+          break;
+      }
+
+      console.log(
+        `Successfully tagged ${resource.resourceType}: ${resource.resourceArn}`
+      );
+      return true;
+    } catch (error) {
+      console.error(
+        `Error tagging resource (attempt ${attempt}/${retries}): ${resource.resourceArn}`,
+        error
+      );
+
+      if (attempt === retries) {
+        console.error(
+          `Failed to tag resource after ${retries} attempts: ${resource.resourceArn}`
+        );
+        return false;
+      }
+
+      // Exponential backoff
+      await new Promise((resolve) =>
+        setTimeout(resolve, 1000 * Math.pow(2, attempt - 1))
+      );
+    }
+  }
+  return false;
+}
+
+/**
+ * Tag EC2 instance using EC2 API
+ */
+async function tagEC2Instance(
+  resource: ResourceWithTags,
+  tags: Record<string, string>
+) {
+  const ec2Client = new EC2Client({
+    region: resource.region,
+  });
+
+  const tagsArray = Object.entries(tags).map(([Key, Value]) => ({
+    Key,
+    Value,
+  }));
+
+  const command = new EC2CreateTagsCommand({
+    Resources: [resource.resourceId!],
+    Tags: tagsArray,
+  });
+
+  await ec2Client.send(command);
+}
+
+/**
+ * Tag Security Group using EC2 API
+ */
+async function tagSecurityGroup(
+  resource: ResourceWithTags,
+  tags: Record<string, string>
+) {
+  const ec2Client = new EC2Client({
+    region: resource.region,
+  });
+
+  const tagsArray = Object.entries(tags).map(([Key, Value]) => ({
+    Key,
+    Value,
+  }));
+
+  const command = new EC2CreateTagsCommand({
+    Resources: [resource.resourceId!],
+    Tags: tagsArray,
+  });
+
+  await ec2Client.send(command);
+}
+
+/**
+ * Tag IAM Role using IAM API
+ */
+async function tagIAMRole(
+  resource: ResourceWithTags,
+  tags: Record<string, string>
+) {
+  const iamClient = new IAMClient({
+    region: "us-east-1",
+  });
+
+  const tagsArray = Object.entries(tags).map(([Key, Value]) => ({
+    Key,
+    Value,
+  }));
+
+  const command = new TagRoleCommand({
+    RoleName: resource.resourceId!,
+    Tags: tagsArray,
+  });
+
+  await iamClient.send(command);
+}
+
+/**
+ * Tag S3 bucket using S3 API
+ */
+async function tagS3Bucket(
+  resource: ResourceWithTags,
+  tags: Record<string, string>
+) {
+  const s3Client = new S3Client({
+    region: resource.region,
+  });
+
+  const tagsArray = Object.entries(tags).map(([Key, Value]) => ({
+    Key,
+    Value,
+  }));
+
+  const command = new PutBucketTaggingCommand({
+    Bucket: resource.resourceId!,
+    Tagging: {
+      TagSet: tagsArray,
+    },
+  });
+
+  await s3Client.send(command);
+}
+
+/**
+ * Tag IAM User using IAM API
+ */
+async function tagIAMUser(
+  resource: ResourceWithTags,
+  tags: Record<string, string>
+) {
+  const iamClient = new IAMClient({
+    region: "us-east-1",
+  });
+
+  const tagsArray = Object.entries(tags).map(([Key, Value]) => ({
+    Key,
+    Value,
+  }));
+
+  const command = new TagUserCommand({
+    UserName: resource.resourceId!,
+    Tags: tagsArray,
+  });
+
+  await iamClient.send(command);
+}
+
+/**
+ * Tag SNS resource using SNS API
+ */
+async function tagSNSResource(
+  resource: ResourceWithTags,
+  tags: Record<string, string>
+) {
+  const snsClient = new SNSClient({
+    region: resource.region,
+  });
+
+  const tagsArray = Object.entries(tags).map(([Key, Value]) => ({
+    Key,
+    Value,
+  }));
+
+  const command = new TagResourceCommand({
+    ResourceArn: resource.resourceArn,
+    Tags: tagsArray,
+  });
+
+  await snsClient.send(command);
+}
+
+/**
+ * Tag resource using Resource Groups Tagging API
+ */
+async function tagWithResourceGroupsAPI(
+  resource: ResourceWithTags,
+  tags: Record<string, string>
+) {
+  const taggingClient = new ResourceGroupsTaggingAPIClient({
+    region: resource.region === "global" ? "us-east-1" : resource.region,
+  });
+
+  const command = new TagResourcesCommand({
+    ResourceARNList: [resource.resourceArn],
+    Tags: tags,
+  });
+
+  await taggingClient.send(command);
+}
+
+/**
+ * Get all resources across all regions and services
+ */
+async function getAllResources(): Promise<ResourceWithTags[]> {
+  console.log("Discovering all resources across regions and services...\n");
+
+  const allResources: ResourceWithTags[] = [];
+  const regions = await getAllRegions();
+
+  console.log(`Found ${regions.length} regions: ${regions.join(", ")}\n`);
+
+  // Get IAM resources (global)
+  console.log("Fetching IAM roles and users (global)...");
+  try {
+    const [iamRoles, iamUsers] = await Promise.all([
+      getIAMRoles(),
+      getIAMUsers(),
+    ]);
+    allResources.push(...iamRoles, ...iamUsers);
+    console.log(
+      `Found ${iamRoles.length} IAM roles and ${iamUsers.length} IAM users\n`
+    );
+  } catch (error) {
+    console.error("Error fetching IAM resources:", error);
+  }
+
+  // Get S3 resources (global)
+  console.log("Fetching S3 buckets (global)...");
+  try {
+    const s3Buckets = await getS3Buckets();
+    allResources.push(...s3Buckets);
+    console.log(`Found ${s3Buckets.length} S3 buckets\n`);
+  } catch (error) {
+    console.error("Error fetching S3 resources:", error);
+  }
+
+  // Process each region
+  for (const region of regions) {
+    console.log(`Processing region: ${region}`);
+
+    try {
+      const [taggingApiResources, ec2Instances, securityGroups] =
+        await Promise.all([
+          getResourcesFromTaggingAPI(region),
+          getEC2Instances(region),
+          getSecurityGroups(region),
+        ]);
+
+      // Merge all resources, avoiding duplicates based on ARN
+      const regionResources = new Map<string, ResourceWithTags>();
+
+      [...taggingApiResources, ...ec2Instances, ...securityGroups].forEach(
+        (resource) => {
+          regionResources.set(resource.resourceArn, resource);
+        }
+      );
+
+      const uniqueRegionResources = Array.from(regionResources.values());
+      allResources.push(...uniqueRegionResources);
+
+      console.log(
+        `  Found ${uniqueRegionResources.length} unique resources in ${region}`
+      );
+    } catch (error) {
+      console.error(`Error processing region ${region}:`, error);
+    }
+  }
+
+  console.log(`\nTotal resources discovered: ${allResources.length}`);
+  return allResources;
+}
+
+/**
+ * Main processing function
+ */
+async function processAllResources() {
+  const startTime = Date.now();
+  console.log("Starting comprehensive AWS resource tagging process...\n");
+
+  try {
+    // Get all resources
+    const allResources = await getAllResources();
+
+    // Filter resources that need tagging
+    const resourcesNeedingTags = getResourcesNeedingTags(allResources);
+
+    console.log(
+      `\nResources needing tags: ${resourcesNeedingTags.length} out of ${allResources.length}`
+    );
+
+    if (resourcesNeedingTags.length === 0) {
+      console.log("All resources are already properly tagged!");
+      return;
+    }
+
+    // Group resources by type for better reporting
+    const resourcesByType = resourcesNeedingTags.reduce((acc, resource) => {
+      acc[resource.resourceType] = (acc[resource.resourceType] || 0) + 1;
+      return acc;
+    }, {} as Record<string, number>);
+
+    console.log("\n📊 Resources to tag by type:");
+    Object.entries(resourcesByType).forEach(([type, count]) => {
+      console.log(`  - ${type}: ${count}`);
+    });
+    console.log();
+
+    // Tag resources
+    let successCount = 0;
+    let failureCount = 0;
+    const errors: string[] = [];
+
+    for (let i = 0; i < resourcesNeedingTags.length; i++) {
+      const resource = resourcesNeedingTags[i];
+      const progress = `[${i + 1}/${resourcesNeedingTags.length}]`;
+
+      console.log(
+        `${progress} Tagging ${resource.resourceType}: ${
+          resource.resourceId || resource.resourceArn
+        }`
+      );
+
+      const success = await tagResource(resource);
+      if (success) {
+        successCount++;
+      } else {
+        failureCount++;
+        errors.push(`Failed to tag: ${resource.resourceArn}`);
+      }
+
+      // Delay to avoid rate limiting
+      if (i < resourcesNeedingTags.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+
+    const endTime = Date.now();
+    const duration = ((endTime - startTime) / 1000).toFixed(2);
+
+    console.log("\n" + "=".repeat(60));
+    console.log("TAGGING SUMMARY");
+    console.log("=".repeat(60));
+    console.log(`Successfully tagged: ${successCount} resources`);
+    console.log(`Failed to tag: ${failureCount} resources`);
+    console.log(`Total execution time: ${duration} seconds`);
+
+    if (errors.length > 0) {
+      console.log("\nFailed resources:");
+      errors.forEach((error) => console.log(`  - ${error}`));
+    }
+
+    console.log("\nTagging process completed!");
+  } catch (error) {
+    console.error("\nCritical error in tagging process:", error);
+    process.exit(1);
+  }
+}
+
+/**
+ * Main entry point
+ */
+async function main() {
+  await processAllResources();
+}
+
+// Run the script
+main().catch((error) => {
+  console.error("Unhandled error:", error);
+  process.exit(1);
+});

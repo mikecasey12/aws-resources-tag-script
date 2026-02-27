@@ -7,6 +7,7 @@
 
 # ---------------------------------------------------------------------------
 # VPC resolution
+# Priority: explicit vpc_id  →  default VPC  →  create new VPC
 # ---------------------------------------------------------------------------
 
 data "aws_vpc" "selected" {
@@ -14,15 +15,14 @@ data "aws_vpc" "selected" {
   id    = var.vpc_id
 }
 
-data "aws_vpc" "default" {
-  count   = var.vpc_id == "" ? 1 : 0
-  default = true
+# aws_vpcs (plural) returns an empty list when no default VPC exists — safe to
+# use as a conditional unlike the singular data source which hard-errors.
+data "aws_vpcs" "default" {
+  count = var.vpc_id == "" ? 1 : 0
 
-  lifecycle {
-    postcondition {
-      condition     = self.id != "" && self.id != null
-      error_message = "No default VPC found in this region. Please specify a VPC ID using the 'vpc_id' variable."
-    }
+  filter {
+    name   = "isDefault"
+    values = ["true"]
   }
 }
 
@@ -30,38 +30,65 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
-resource "terraform_data" "vpc_validation" {
-  lifecycle {
-    precondition {
-      condition     = var.vpc_id != "" || length(data.aws_vpc.default) > 0
-      error_message = <<-EOT
-        No VPC available for resource creation.
+locals {
+  has_default_vpc = (
+    var.vpc_id == "" &&
+    length(data.aws_vpcs.default) > 0 &&
+    length(data.aws_vpcs.default[0].ids) > 0
+  )
+  default_vpc_id = local.has_default_vpc ? data.aws_vpcs.default[0].ids[0] : null
 
-        Either:
-          1. Specify a VPC ID using the 'vpc_id' variable in your terraform.tfvars
-          2. Create a default VPC in your AWS account
-      EOT
-    }
+  # True when a brand-new VPC will be created — known at plan time because it
+  # depends only on variables and data sources, never on resource attributes.
+  creating_new_vpc = var.vpc_id == "" && !local.has_default_vpc
+
+  # VPC ID that is ALWAYS known at plan time.
+  # When creating_new_vpc = true this is null; data sources that need a VPC ID
+  # for their filter use coalesce(..., "") and are guarded with count = 0 so
+  # they are never executed. This breaks the "count depends on unknown value"
+  # chain that would otherwise flow through aws_vpc.new[0].id.
+  plan_time_vpc_id = var.vpc_id != "" ? data.aws_vpc.selected[0].id : (
+    local.has_default_vpc ? local.default_vpc_id : null
+  )
+}
+
+# Full details of the default VPC (only fetched when it actually exists)
+data "aws_vpc" "default" {
+  count = local.has_default_vpc ? 1 : 0
+  id    = local.default_vpc_id
+}
+
+# Created only when no vpc_id is supplied and no default VPC exists
+resource "aws_vpc" "new" {
+  count = local.creating_new_vpc ? 1 : 0
+
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+
+  tags = {
+    Name      = "ecs-vpc"
+    ManagedBy = "terraform"
   }
 }
 
 locals {
+  # vpc_id may reference aws_vpc.new[0].id (known after apply) — used only in
+  # resource bodies, never in count/for_each arguments.
   vpc_id = var.vpc_id != "" ? data.aws_vpc.selected[0].id : (
-    length(data.aws_vpc.default) > 0 ? data.aws_vpc.default[0].id : null
+    local.has_default_vpc ? local.default_vpc_id : aws_vpc.new[0].id
   )
 
   vpc_cidr = var.vpc_id != "" ? data.aws_vpc.selected[0].cidr_block : (
-    length(data.aws_vpc.default) > 0 ? data.aws_vpc.default[0].cidr_block : null
+    local.has_default_vpc ? data.aws_vpc.default[0].cidr_block : aws_vpc.new[0].cidr_block
   )
 }
 
 # ---------------------------------------------------------------------------
 # Step 1 — Verify explicitly provided IDs actually exist in AWS
-# data "aws_subnets" / "aws_security_groups" return an EMPTY list (no error)
-# when a filter matches nothing, so these are safe "check if exists" queries.
+# These data sources filter by ID, not by VPC, so they never touch vpc_id.
 # ---------------------------------------------------------------------------
 
-# Returns only the provided subnet IDs that currently exist in AWS
 data "aws_subnets" "provided" {
   count = length(var.private_subnets) > 0 ? 1 : 0
 
@@ -71,7 +98,6 @@ data "aws_subnets" "provided" {
   }
 }
 
-# Returns the provided SG ID only if it currently exists in AWS
 data "aws_security_groups" "provided_sg" {
   count = var.ecs_sg_id != "" ? 1 : 0
 
@@ -83,13 +109,20 @@ data "aws_security_groups" "provided_sg" {
 
 # ---------------------------------------------------------------------------
 # Step 2 — Auto-discover resources previously created by this configuration
+#
+# count = 0 when creating_new_vpc = true:
+#   • A brand-new VPC cannot contain pre-existing tagged resources, so the
+#     lookup can be skipped unconditionally.
+#   • This also ensures the filter value (plan_time_vpc_id) is never null
+#     when the data source actually runs (count = 1).
 # ---------------------------------------------------------------------------
 
-# Subnets tagged by a previous apply of this configuration
 data "aws_subnets" "managed" {
+  count = local.creating_new_vpc ? 0 : 1
+
   filter {
     name   = "vpc-id"
-    values = [local.vpc_id]
+    values = [coalesce(local.plan_time_vpc_id, "")]
   }
   tags = {
     ManagedBy = "terraform"
@@ -97,11 +130,12 @@ data "aws_subnets" "managed" {
   }
 }
 
-# Security group tagged by a previous apply of this configuration
 data "aws_security_groups" "managed_ecs" {
+  count = local.creating_new_vpc ? 0 : 1
+
   filter {
     name   = "vpc-id"
-    values = [local.vpc_id]
+    values = [coalesce(local.plan_time_vpc_id, "")]
   }
   filter {
     name   = "group-name"
@@ -114,39 +148,40 @@ data "aws_security_groups" "managed_ecs" {
 
 # ---------------------------------------------------------------------------
 # Resource resolution locals
-# Priority: provided IDs (verified) → auto-discovered (by tag) → create new
+# All values here are deterministic at plan time — no resource attributes used.
 # ---------------------------------------------------------------------------
 
 locals {
   # Subnets ----------------------------------------------------------------
-  # All provided IDs are valid only when AWS confirms every one of them exists
   provided_subnets_valid = (
     length(var.private_subnets) > 0 &&
     length(data.aws_subnets.provided) > 0 &&
     length(data.aws_subnets.provided[0].ids) == length(var.private_subnets)
   )
-  discovered_subnet_ids = tolist(data.aws_subnets.managed.ids)
-  resolved_subnet_ids = (
-    local.provided_subnets_valid ? var.private_subnets : local.discovered_subnet_ids
-  )
-  use_existing_subnets = length(local.resolved_subnet_ids) > 0
-  private_subnet_ids   = local.use_existing_subnets ? local.resolved_subnet_ids : aws_subnet.private[*].id
+  discovered_subnet_ids = length(data.aws_subnets.managed) > 0 ? tolist(data.aws_subnets.managed[0].ids) : []
+  resolved_subnet_ids   = local.provided_subnets_valid ? var.private_subnets : local.discovered_subnet_ids
+  use_existing_subnets  = length(local.resolved_subnet_ids) > 0
+  private_subnet_ids    = local.use_existing_subnets ? local.resolved_subnet_ids : aws_subnet.private[*].id
 
   # Security group ---------------------------------------------------------
-  # The provided SG ID is valid only when AWS confirms it exists
   provided_sg_valid = (
     var.ecs_sg_id != "" &&
     length(data.aws_security_groups.provided_sg) > 0 &&
     length(data.aws_security_groups.provided_sg[0].ids) > 0
   )
-  discovered_sg_id = length(data.aws_security_groups.managed_ecs.ids) > 0 ? data.aws_security_groups.managed_ecs.ids[0] : ""
-  resolved_sg_id   = local.provided_sg_valid ? var.ecs_sg_id : local.discovered_sg_id
-  use_existing_sg  = local.resolved_sg_id != ""
-  ecs_sg_id        = local.use_existing_sg ? local.resolved_sg_id : aws_security_group.ecs_tasks[0].id
+  discovered_sg_id = (
+    length(data.aws_security_groups.managed_ecs) > 0 &&
+    length(data.aws_security_groups.managed_ecs[0].ids) > 0
+    ? data.aws_security_groups.managed_ecs[0].ids[0]
+    : ""
+  )
+  resolved_sg_id  = local.provided_sg_valid ? var.ecs_sg_id : local.discovered_sg_id
+  use_existing_sg = local.resolved_sg_id != ""
+  ecs_sg_id       = local.use_existing_sg ? local.resolved_sg_id : aws_security_group.ecs_tasks[0].id
 }
 
 # ---------------------------------------------------------------------------
-# Resource creation (skipped when existing resources are found/provided)
+# Resource creation (count is fully deterministic at plan time)
 # ---------------------------------------------------------------------------
 
 resource "aws_subnet" "private" {
