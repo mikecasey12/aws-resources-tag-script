@@ -8,33 +8,36 @@ variable "cluster_arn" {
 # ---------------------------------------------------------------------------
 
 variable "vpc_id" {
-  description = "VPC ID where resources will be created. Leave empty to use the default VPC."
-  type        = string
-  default     = ""
+  description = <<-EOT
+    VPC ID where ECS resources will be deployed.
+    Enter a VPC ID (e.g. vpc-0123456789abcdef0), or leave blank ("") to use the
+    account's default VPC. A new VPC is created automatically when no default exists.
+    Tip: run `terraform output available_vpcs` after init to see existing VPCs.
+  EOT
+  type    = string
 
   validation {
     condition     = var.vpc_id == "" || can(regex("^vpc-[a-z0-9]{8,}$", var.vpc_id))
-    error_message = "The vpc_id must be a valid VPC ID (e.g., vpc-1234567890abcdef0) or empty to use the default VPC."
+    error_message = "Must be a valid VPC ID (e.g. vpc-1234567890abcdef0) or an empty string."
   }
 }
 
 variable "private_subnets" {
   description = <<-EOT
-    List of existing private subnet IDs to use for ECS tasks.
-    When provided, these subnets are used as-is.
-    When left empty, Terraform will look for subnets it previously created (by tag)
-    and create new ones if none are found.
+    Subnet IDs for ECS tasks. Enter as an HCL list, e.g. ["subnet-aaa", "subnet-bbb"].
+    Recommended: 2+ subnets in different Availability Zones.
+    Enter [] to let Terraform auto-discover previously-created subnets or create new ones.
+    Tip: run `terraform output available_subnets` after setting vpc_id to see existing subnets.
   EOT
-  type        = list(string)
-  default     = []
+  type    = list(string)
 }
 
 variable "ecs_sg_id" {
   description = <<-EOT
-    Existing security group ID for ECS tasks.
+    ID of an existing security group to attach to ECS tasks.
     When provided, this security group is used as-is.
-    When left empty, Terraform will look for a security group it previously created
-    (by tag) and create a new one if none is found.
+    When left empty, Terraform will look for a security group it previously
+    created (matched by tag) and create a new one if none is found.
   EOT
   type        = string
   default     = ""

@@ -35,12 +35,12 @@ resource "aws_iam_role_policy" "eb_run_task" {
         Effect   = "Allow"
         Action   = "iam:PassRole"
         Resource = [aws_iam_role.ecs_exec_role.arn, aws_iam_role.ecs_task_role.arn]
-      },
-      {
-        Action   = ["secretsmanager:GetSecretValue"]
-        Effect   = "Allow"
-        Resource = [data.aws_secretsmanager_secret.aws_keys.arn]
       }
+      # {
+      #   Action   = ["secretsmanager:GetSecretValue"]
+      #   Effect   = "Allow"
+      #   Resource = [data.aws_secretsmanager_secret.aws_keys.arn]
+      # }
     ]
   })
 }

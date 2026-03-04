@@ -62,3 +62,44 @@ output "created_security_group" {
   description = "Indicates whether a new security group was created (true) or an existing one was used (false)"
   value       = !local.use_existing_sg
 }
+
+# ---------------------------------------------------------------------------
+# Discovery outputs — browse what exists in the account without leaving
+# Terraform.  Useful before running select-network.py.
+#
+#   terraform output available_vpcs
+#   terraform output available_subnets
+# ---------------------------------------------------------------------------
+
+output "available_vpcs" {
+  description = <<-EOT
+    All VPCs currently available in the configured AWS region.
+    Run `terraform output available_vpcs` to list them, then set vpc_id in
+    terraform.tfvars (or enter the ID when Terraform prompts for it).
+  EOT
+  value = {
+    for id, v in data.aws_vpc.all_details : id => {
+      cidr       = v.cidr_block
+      is_default = v.default
+      name       = try(v.tags["Name"], "(no name)")
+      state      = v.state
+    }
+  }
+}
+
+output "available_subnets" {
+  description = <<-EOT
+    All subnets in the currently resolved VPC.
+    Run `terraform output available_subnets` to see them, then set
+    private_subnets in terraform.tfvars (or enter them when Terraform prompts).
+  EOT
+  value = {
+    for id, s in data.aws_subnet.all_in_vpc_details : id => {
+      cidr             = s.cidr_block
+      availability_zone = s.availability_zone
+      name             = try(s.tags["Name"], "(no name)")
+      public           = s.map_public_ip_on_launch
+      available_ips    = s.available_ip_address_count
+    }
+  }
+}

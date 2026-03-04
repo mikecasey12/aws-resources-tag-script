@@ -4,6 +4,24 @@
 #      — verified to actually exist in AWS; falls through if any ID is missing
 #   2. Auto-discovered resources previously created by this configuration (matched by tag)
 #   3. Create new resources when neither of the above yields a result
+#
+# Interactive selection
+#   When vpc_id or private_subnets are not set in terraform.tfvars, Terraform
+#   will prompt for them at the start of every plan/apply.  To see what exists
+#   in the account before answering the prompts, run:
+#     terraform output available_vpcs
+#     terraform output available_subnets
+
+# ---------------------------------------------------------------------------
+# Discovery — enumerate every VPC and its subnets for the available_* outputs
+# ---------------------------------------------------------------------------
+
+data "aws_vpcs" "all" {}
+
+data "aws_vpc" "all_details" {
+  for_each = toset(data.aws_vpcs.all.ids)
+  id       = each.value
+}
 
 # ---------------------------------------------------------------------------
 # VPC resolution
@@ -144,6 +162,28 @@ data "aws_security_groups" "managed_ecs" {
   tags = {
     ManagedBy = "terraform"
   }
+}
+
+# All subnets in the resolved VPC — used by the available_subnets output so
+# operators can inspect subnet options without leaving Terraform.
+data "aws_subnets" "all_in_vpc" {
+  count = local.creating_new_vpc ? 0 : 1
+
+  filter {
+    name   = "vpc-id"
+    values = [coalesce(local.plan_time_vpc_id, "")]
+  }
+}
+
+data "aws_subnet" "all_in_vpc_details" {
+  for_each = (
+    local.creating_new_vpc ? toset([]) : toset(
+      length(data.aws_subnets.all_in_vpc) > 0
+      ? data.aws_subnets.all_in_vpc[0].ids
+      : []
+    )
+  )
+  id = each.value
 }
 
 # ---------------------------------------------------------------------------

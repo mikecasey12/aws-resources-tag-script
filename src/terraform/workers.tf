@@ -37,9 +37,9 @@ resource "aws_iam_role" "ecs_task_role" {
 }
 
 # Fetch AWS keys
-data "aws_secretsmanager_secret" "aws_keys" {
-  name = "ECSDeploySecrets"
-}
+# data "aws_secretsmanager_secret" "aws_keys" {
+#   name = "ECSDeploySecrets"
+# }
 
 # Trust document used by both
 data "aws_iam_policy_document" "ecs_trust" {

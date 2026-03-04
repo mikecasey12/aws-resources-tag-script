@@ -15,31 +15,42 @@ container_image = "123456789012.dkr.ecr.us-east-1.amazonaws.com/tag-script:lates
 # Network Configuration
 ###############################################################################
 
-# VPC to deploy into.  Omit if you have a default VPC.
-# vpc_id = "vpc-xxxxxxxxxxxxxxxxx"
+# ---------------------------------------------------------------------------
+# VPC  (required — Terraform will prompt if not set here)
+# ---------------------------------------------------------------------------
+# Set to a specific VPC ID to use an existing VPC.
+# Set to "" (empty string) to use the account's default VPC, or let Terraform
+# create a new one if no default VPC exists.
+#
+# Not sure which VPC to use?  Leave this file as-is, run `terraform apply`,
+# answer the prompt with "", then run `terraform output available_vpcs` to see
+# all VPCs in the region.  Update this file and re-apply with the correct ID.
+#
+vpc_id = "vpc-xxxxxxxxxxxxxxxxx"
 
 # ---------------------------------------------------------------------------
-# Subnets
+# Subnets  (required — Terraform will prompt if not set here)
 # ---------------------------------------------------------------------------
-# Option A — provide existing subnet IDs (used as-is, no lookup performed):
-# private_subnets = [
-#   "subnet-xxxxxxxxxxxxxxxxx",
-#   "subnet-xxxxxxxxxxxxxxxxx",
-# ]
+# Set to a list of existing subnet IDs (recommended: 2+ in different AZs).
+# Set to [] to let Terraform auto-discover previously-created subnets or create
+# new ones inside the resolved VPC.
 #
-# Option B — leave unset (or set to []):
-#   Terraform will first look for subnets it previously created (matched by
-#   the ManagedBy=terraform tag).  If none are found it will create new ones.
+# After setting vpc_id above, run `terraform output available_subnets` to see
+# all subnets in that VPC, then update this list accordingly.
 #
-# Number of subnets to create when none are found (default: 2):
+private_subnets = [
+  "subnet-xxxxxxxxxxxxxxxxx",
+  "subnet-xxxxxxxxxxxxxxxxx",
+]
+
+# Number of subnets to create when private_subnets = [] and none are found (default: 2):
 # subnet_count = 2
 
 # ---------------------------------------------------------------------------
-# ECS Security Group
+# ECS Security Group  (optional)
 # ---------------------------------------------------------------------------
-# Option A — provide an existing security group ID (used as-is):
-# ecs_sg_id = "sg-xxxxxxxxxxxxxxxxx"
+# Set to an existing security group ID to use it as-is.
+# Leave unset or set to "" and Terraform will reuse the security group it
+# previously created (matched by tag) or create a new one.
 #
-# Option B — leave unset (or set to ""):
-#   Terraform will first look for a security group it previously created
-#   (matched by tag).  If none is found it will create a new one.
+# ecs_sg_id = "sg-xxxxxxxxxxxxxxxxx"

@@ -20,40 +20,58 @@ This Terraform configuration deploys an ECS Fargate task that runs on a schedule
 
 ## Network Configuration
 
-This configuration supports two network setup options:
+### How Terraform prompts for VPC and subnets
 
-### Option 1: Create New Network Resources (Recommended)
+`vpc_id` and `private_subnets` have no default values. When they are not set in
+`terraform.tfvars`, Terraform will prompt for them interactively at the start of
+every `terraform plan` or `terraform apply`:
 
-Terraform will automatically create private subnets and a security group for your ECS tasks. This is the simplest approach for new deployments.
+```
+var.private_subnets
+  Subnet IDs for ECS tasks. Enter as an HCL list, e.g. ["subnet-aaa", "subnet-bbb"].
+  ...
+  Enter a value: ["subnet-022e657227078b628", "subnet-044aa97daf963a391"]
 
-In `terraform.tfvars`:
-```hcl
-# Optional: Specify VPC ID (if not provided, uses default VPC if available)
-# IMPORTANT: If your account has no default VPC, you MUST specify a vpc_id
-vpc_id = "vpc-xxxxxxxxxxxxxxxxx"
-
-# Optional: Number of subnets to create (default: 2)
-subnet_count = 2
+var.vpc_id
+  VPC ID where ECS resources will be deployed.
+  ...
+  Enter a value: vpc-0f1e2d3c4b5a6789a
 ```
 
-**Important**: If you don't have a default VPC in your AWS account/region, you must explicitly provide a `vpc_id`. The configuration will fail with a clear error message if no VPC is available.
+To skip the prompts on future runs, add the chosen values to `terraform.tfvars`:
 
-### Option 2: Use Existing Network Resources
-
-If you already have private subnets and a security group, you can reference them:
-
-In `terraform.tfvars`:
 ```hcl
-existing_private_subnets = [
-  "subnet-xxxxxxxxxxxxxxxxx",
-  "subnet-xxxxxxxxxxxxxxxxx"
+vpc_id = "vpc-0f1e2d3c4b5a6789a"
+
+private_subnets = [
+  "subnet-022e657227078b628",
+  "subnet-044aa97daf963a391",
 ]
-existing_ecs_sg_id = "sg-xxxxxxxxxxxxxxxxx"
 ```
 
-**Note**: The security group must allow:
-- Outbound HTTPS (port 443) for AWS API calls
-- Subnets should have internet access via NAT Gateway or VPC endpoints
+> **Tip — not sure which IDs to use?**  Run `terraform init` then `terraform apply`
+> once, answer the `vpc_id` prompt with `""` (empty), and after the apply completes
+> inspect the discovery outputs:
+>
+> ```bash
+> terraform output available_vpcs     # every VPC in the region
+> terraform output available_subnets  # every subnet in the resolved VPC
+> ```
+>
+> Then set the correct IDs in `terraform.tfvars` and re-apply.
+
+### VPC and subnet resolution priority
+
+| Priority | VPC | Subnets |
+|----------|-----|---------|
+| 1 | `vpc_id` variable (prompted if not set) | `private_subnets` variable (prompted if not set) |
+| 2 | Account's default VPC (when `vpc_id = ""`) | Subnets previously created by this config (matched by `ManagedBy=terraform` tag) |
+| 3 | Creates a new VPC | Creates new subnets |
+
+### Security group
+
+`ecs_sg_id` is optional (defaults to `""`). Leave it unset and Terraform will
+reuse the security group it previously created (matched by tag) or create a new one.
 
 ## Setup
 
@@ -63,11 +81,10 @@ existing_ecs_sg_id = "sg-xxxxxxxxxxxxxxxxx"
    cp terraform.tfvars.example terraform.tfvars
    ```
 
-2. Edit `terraform.tfvars` with your actual values:
+2. Edit `terraform.tfvars` with your required values:
    - `cluster_arn`: Your ECS cluster ARN
    - `aws_region`: AWS region (default: us-east-1)
    - `container_image`: Your Docker image URI
-   - Network configuration (see options above)
 
 3. Initialize Terraform:
 
@@ -75,13 +92,14 @@ existing_ecs_sg_id = "sg-xxxxxxxxxxxxxxxxx"
    terraform init
    ```
 
-4. Review the plan:
+4. Review the plan (Terraform will prompt for `vpc_id` and `private_subnets` if not set):
 
    ```bash
    terraform plan
    ```
 
 5. Apply the configuration:
+
    ```bash
    terraform apply
    ```
